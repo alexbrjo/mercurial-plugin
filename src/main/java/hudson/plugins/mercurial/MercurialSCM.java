@@ -644,55 +644,61 @@ public class MercurialSCM extends SCM implements Serializable {
 
         MercurialTagAction prevTag = (MercurialTagAction) baseline;
         if (prevTag == null) {
-            listener.getLogger().println("WARN: Revision data for previous build unavailable; unable to determine change log");
+            // make an exception for the first build, but warn if previous build does not have a changelog
+            if (build.getNumber() == 1) {
+                listener.getLogger().println("First time build. Skipping changelog");
+            } else {
+                listener.getLogger().println("WARN: Revision data for previous build unavailable; unable to determine change log");
+            }
+
             createEmptyChangeLog(changelogFile, listener, "changelog");
             return;
         }
+
+        // previous build confirmed exists, write changelog
         EnvVars env = build.getEnvironment(listener);
         MercurialInstallation inst = findInstallation(getInstallation());
         StandardUsernameCredentials credentials = getCredentials(build.getParent(), env);
         HgExe hg = new HgExe(inst, credentials, launcher, node, listener, env);
         try {
+            ArgumentListBuilder logCommand = hg.seed(true).add("log", "--rev", prevTag.getId(), "--template", "exists\\n");
+            int exitCode = hg.launch(logCommand).pwd(repository).join();
+            if(exitCode != 0) {
+                listener.error("Previously built revision " + prevTag.getId() + " is not known in this clone; unable to determine change log");
+                createEmptyChangeLog(changelogFile, listener, "changelog");
+                return;
+            }
 
-        ArgumentListBuilder logCommand = hg.seed(true).add("log", "--rev", prevTag.getId(), "--template", "exists\\n");
-        int exitCode = hg.launch(logCommand).pwd(repository).join();
-        if(exitCode != 0) {
-            listener.error("Previously built revision " + prevTag.getId() + " is not known in this clone; unable to determine change log");
-            createEmptyChangeLog(changelogFile, listener, "changelog");
-            return;
-        }
-        
-        // calc changelog
-        final FileOutputStream os = new FileOutputStream(changelogFile);
-        try {
-            os.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".getBytes("UTF-8"));
+            // calc changelog
+            final FileOutputStream os = new FileOutputStream(changelogFile);
             try {
-                os.write("<changesets>\n".getBytes("UTF-8"));
-                ArgumentListBuilder args = hg.seed(false);
-                args.add("log");
-                args.add("--template", MercurialChangeSet.CHANGELOG_TEMPLATE);
-                if(revisionType == RevisionType.REVSET) {
-                    args.add("--rev", "ancestors(" + revToBuild + ") and not ancestors(" + prevTag.getId() + ")");
-                }
-                else {
-                    args.add("--rev", "ancestors('" + revToBuild.replace("'", "\\'") + "') and not ancestors(" + prevTag.getId() + ")");
-                }
-                args.add("--encoding", "UTF-8");
-                args.add("--encodingmode", "replace");
+                os.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".getBytes("UTF-8"));
+                try {
+                    os.write("<changesets>\n".getBytes("UTF-8"));
+                    ArgumentListBuilder args = hg.seed(false);
+                    args.add("log");
+                    args.add("--template", MercurialChangeSet.CHANGELOG_TEMPLATE);
+                    if(revisionType == RevisionType.REVSET) {
+                        args.add("--rev", "ancestors(" + revToBuild + ") and not ancestors(" + prevTag.getId() + ")");
+                    } else {
+                        args.add("--rev", "ancestors('" + revToBuild.replace("'", "\\'") + "') and not ancestors(" + prevTag.getId() + ")");
+                    }
+                    args.add("--encoding", "UTF-8");
+                    args.add("--encodingmode", "replace");
 
-                ByteArrayOutputStream errorLog = new ByteArrayOutputStream();
+                    ByteArrayOutputStream errorLog = new ByteArrayOutputStream();
 
-                int r = hg.launch(args).stdout(new ForkOutputStream(os, errorLog)).pwd(repository).join();
-                if(r!=0) {
-                    Util.copyStream(new ByteArrayInputStream(errorLog.toByteArray()), listener.getLogger());
-                    throw new IOException("Failure detected while running hg log to determine change log");
+                    int r = hg.launch(args).stdout(new ForkOutputStream(os, errorLog)).pwd(repository).join();
+                    if(r!=0) {
+                        Util.copyStream(new ByteArrayInputStream(errorLog.toByteArray()), listener.getLogger());
+                        throw new IOException("Failure detected while running hg log to determine change log");
+                    }
+                } finally {
+                    os.write("</changesets>".getBytes("UTF-8"));
                 }
             } finally {
-                os.write("</changesets>".getBytes("UTF-8"));
+                os.close();
             }
-        } finally {
-            os.close();
-        }
         } finally {
             hg.close();
         }
